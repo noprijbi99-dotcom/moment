@@ -92,12 +92,18 @@ def _load_state():
 
 
 def _save_state(state):
-    directory = _state_dir()
-    os.makedirs(directory, exist_ok=True)
-    tmp = _state_path() + ".tmp"
-    with open(tmp, "w") as handle:
-        json.dump(state, handle)
-    os.replace(tmp, _state_path())
+    # Persistence is best-effort: a full disk or a read-only plugin-data
+    # directory must never raise out of the hook and break the user's turn.
+    # Losing one state write only costs the report-once bookkeeping.
+    try:
+        directory = _state_dir()
+        os.makedirs(directory, exist_ok=True)
+        tmp = _state_path() + ".tmp"
+        with open(tmp, "w") as handle:
+            json.dump(state, handle)
+        os.replace(tmp, _state_path())
+    except OSError:
+        pass
 
 
 def _diff_lines(old_text, new_text):

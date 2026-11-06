@@ -7,7 +7,12 @@ except ImportError:  # pragma: no cover - fallback if loaded as loose modules
 
 
 def _whisper(**kwargs):
-    return drift_whisper(kwargs.get("session_id") or "unknown")
+    # A memory-freshness whisper is never worth a broken turn: whatever
+    # goes wrong inside the hook, the hook answers "nothing to add".
+    try:
+        return drift_whisper(kwargs.get("session_id") or "unknown")
+    except Exception:
+        return None
 
 
 def register(ctx):
