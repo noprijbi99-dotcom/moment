@@ -49,6 +49,12 @@ The same applies after updating the plugin.
   journal) inside its plugin data directory.
 - **No network, no shell, no subprocess, no telemetry.** Python standard
   library only; zero dependencies.
+- The active profile is resolved **on every hook/tool call** through the
+  host's own helpers (`hermes_constants.get_hermes_home()` and
+  `plugins.plugin_storage.plugin_data_dir("moment")`). moment caches no
+  profile paths anywhere, so inside a long-lived process that serves
+  several profiles, each turn is checked against its own profile's files
+  and state — never the launch profile's.
 - Capabilities in `plugin.yaml` are exactly what `register()` registers:
   one tool (`moment_check`), one hook (`pre_llm_call`). The hook never
   blocks or modifies a turn — it only adds context, and only on drift.
@@ -62,7 +68,9 @@ The same applies after updating the plugin.
   state (config, skills, other profiles) is out of scope for 0.1.0.
 - Baselines are per session. A brand-new session takes a fresh baseline
   from the files as they are — drift *between* sessions is normal life,
-  not an anomaly, and is not reported.
+  not an anomaly, and is not reported. Stored state is pruned on load:
+  sessions older than 30 days are dropped and at most the 50 most recent
+  sessions are kept, so `state.json` stays bounded on long-lived gateways.
 - Very large files are fingerprinted in full but only the first 20,000
   characters are kept for line diffs; beyond that, the receipt reports
   the change without a line-level diff.

@@ -1,9 +1,9 @@
 try:
     from .schemas import MOMENT_CHECK
-    from .tools import drift_whisper, moment_check, set_state_dir
+    from .tools import drift_whisper, moment_check
 except ImportError:  # pragma: no cover - fallback if loaded as loose modules
     from schemas import MOMENT_CHECK
-    from tools import drift_whisper, moment_check, set_state_dir
+    from tools import drift_whisper, moment_check
 
 
 def _whisper(**kwargs):
@@ -16,15 +16,10 @@ def _whisper(**kwargs):
 
 
 def register(ctx):
-    # Official state route: the host's per-plugin storage helper
-    # (<hermes home>/plugin-data/<name>/). Fall back to the same path
-    # convention inside tools.py if the import is unavailable.
-    try:
-        from plugins.plugin_storage import plugin_data_dir
-
-        set_state_dir(plugin_data_dir("moment"))
-    except Exception:
-        pass
+    # Nothing profile-specific is resolved or cached here: one Hermes
+    # process can serve several profiles, so the hook and the tool
+    # resolve the active profile's home and this plugin's data directory
+    # fresh on every call (see tools.py).
     ctx.register_tool(
         name=MOMENT_CHECK["name"],
         toolset="moment",

@@ -6,43 +6,63 @@ and memories/USER.md at a session's first turn (the baseline), re-checks
 them on every later turn, and injects a compact drift receipt when one
 changed. State (baselines + receipts journal) lives in the plugin's own
 data directory. Standard library only.
+
+Profile resolution: one Hermes process can serve several profiles, so
+nothing about the active profile is resolved at import or registration
+time and nothing is cached in a module global. Every hook/tool call
+resolves the active profile fresh — hermes_constants.get_hermes_home()
+for the house files and plugins.plugin_storage.plugin_data_dir("moment")
+for the state directory — so a turn is always checked against the files
+of the profile that turn belongs to.
 """
 
 import difflib
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 MAX_STORED_TEXT = 20000  # per file, chars kept for diffing
 MAX_DIFF_LINES = 10  # changed lines shown per receipt
 MAX_LINE_CHARS = 160
 MAX_SOUL_CHARS = 4000  # soul drift: include the new soul text up to this cap
+MAX_STORED_SESSIONS = 50  # state pruning: keep at most this many sessions
+MAX_SESSION_AGE_DAYS = 30  # state pruning: drop sessions older than this
 
-_STATE_DIR = None
 
+def _hermes_home():
+    """The active profile's Hermes home, resolved fresh on every call.
 
-def set_state_dir(path):
-    global _STATE_DIR
-    if path:
-        _STATE_DIR = str(path)
+    Prefers the host's own resolver (context-local profile override ->
+    HERMES_HOME env -> platform default). The env-based fallback mirrors
+    the same final steps for hosts where the import is unavailable.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+
+        return str(get_hermes_home())
+    except Exception:
+        return os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
 
 
 def _state_dir():
-    global _STATE_DIR
-    if _STATE_DIR:
-        return _STATE_DIR
-    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-    _STATE_DIR = os.path.join(home, "plugin-data", "moment")
-    return _STATE_DIR
+    """moment's plugin data directory, resolved fresh on every call.
+
+    Uses the host's per-plugin storage helper, which itself resolves
+    get_hermes_home() on every call and follows the active profile.
+    Never cached: caching it at register() time is what pinned state to
+    the launch profile in 0.1.3.
+    """
+    try:
+        from plugins.plugin_storage import plugin_data_dir
+
+        return str(plugin_data_dir("moment"))
+    except Exception:
+        return os.path.join(_hermes_home(), "plugin-data", "moment")
 
 
 def _state_path():
     return os.path.join(_state_dir(), "state.json")
-
-
-def _hermes_home():
-    return os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
 
 
 def house_files():
@@ -55,7 +75,11 @@ def house_files():
 
 
 def _now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc)
+
+
+def _now_iso():
+    return _now().isoformat()
 
 
 def _read(path):
@@ -83,12 +107,60 @@ def _snapshot():
     return snap
 
 
+def _prune_state(state):
+    """Bound state growth: drop sessions older than MAX_SESSION_AGE_DAYS,
+    then keep only the MAX_STORED_SESSIONS most recent ones.
+
+    Session entries are keyed by session id with an "at" ISO timestamp
+    (the baseline time). Entries whose timestamp cannot be parsed are
+    kept only if they fit inside the recency cap — pruning must never
+    raise and never drop a baseline it cannot date while fresher-dated
+    sessions exist. Returns the (possibly reduced) state dict.
+    """
+    if not isinstance(state, dict) or len(state) <= 1:
+        return state
+
+    def _stamp(entry):
+        try:
+            raw = entry.get("at")
+            stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            return stamp
+        except Exception:
+            return None
+
+    cutoff = _now() - timedelta(days=MAX_SESSION_AGE_DAYS)
+    dated = []
+    undated = []
+    for session_id, entry in state.items():
+        if not isinstance(entry, dict):
+            continue
+        stamp = _stamp(entry)
+        if stamp is None:
+            undated.append((session_id, entry))
+        elif stamp >= cutoff:
+            dated.append((stamp, session_id, entry))
+        # older than the cutoff: dropped
+    dated.sort(key=lambda item: item[0])
+    keep = dated[-MAX_STORED_SESSIONS:]
+    kept = {session_id: entry for _, session_id, entry in keep}
+    room = MAX_STORED_SESSIONS - len(kept)
+    if room > 0:
+        for session_id, entry in undated[-room:]:
+            kept[session_id] = entry
+    return kept
+
+
 def _load_state():
     try:
         with open(_state_path()) as handle:
-            return json.load(handle)
+            state = json.load(handle)
     except Exception:
         return {}
+    if not isinstance(state, dict):
+        return {}
+    return _prune_state(state)
 
 
 def _save_state(state):
@@ -182,7 +254,7 @@ def drift_whisper(session_id):
             for name, info in current.items()
         }
         state[session_id] = {
-            "at": _now(),
+            "at": _now_iso(),
             "files": dict(frozen),  # advancing baseline (report-once logic)
             "files_start": frozen,  # frozen session-start state (moment_check)
             "receipts": [],
@@ -198,10 +270,10 @@ def drift_whisper(session_id):
         base_exists = base.get("exists") if base else False
         if cur["sha"] == base_sha and cur["exists"] == base_exists:
             continue
-        receipt = _receipt(name, base, cur, entry.get("at"), _now())
+        receipt = _receipt(name, base, cur, entry.get("at"), _now_iso())
         receipts.append(receipt)
         entry.setdefault("receipts", []).append(
-            {"file": name, "at": _now(), "receipt": receipt}
+            {"file": name, "at": _now_iso(), "receipt": receipt}
         )
         baseline_files[name] = {
             "exists": cur["exists"],
@@ -222,7 +294,7 @@ def moment_check(args=None, **kwargs):
     state = _load_state()
     entry = state.get(session_id) if session_id else None
     current = _snapshot()
-    report = {"tool": "moment_check", "checked_at": _now(), "files": {}}
+    report = {"tool": "moment_check", "checked_at": _now_iso(), "files": {}}
     for name, cur in current.items():
         if only and name != only:
             continue

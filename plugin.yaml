@@ -1,5 +1,5 @@
 name: moment
-version: 0.1.3
+version: 0.1.4
 description: "Keeps a Hermes agent honest about its own memory. At the first turn of a session it fingerprints the profile's house files (SOUL.md, memories/MEMORY.md, memories/USER.md); on every later turn it re-checks them, and when one changed mid-session it injects a short drift receipt (what changed, baseline time, detection time, the changed lines) so the agent answers from the present instead of its frozen session-start snapshot. Disclosure: reads only those three profile files; writes only its own baseline/journal state in its plugin data directory; no network, no shell, no subprocess, no credentials; Python standard library only."
 provides_tools:
   - moment_check
